@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Request
+from fastapi import Depends, FastAPI, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
@@ -60,7 +60,7 @@ async def login_page(request: Request):
 
 
 @app.post("/login")
-async def login_action(response: RedirectResponse = login):
+async def login_action(response: RedirectResponse = Depends(login)):
     """Handle login form submission."""
     return response
 
