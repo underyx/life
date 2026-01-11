@@ -1,0 +1,90 @@
+{% extends "base.html" %}
+
+{% block title %}Shipments - Life Dashboard{% endblock %}
+
+{% block content %}
+<h1>Shipments</h1>
+
+<div class="card">
+    <h2>Add Shipment</h2>
+    <form method="post" action="/shipments/add" style="display: flex; gap: 8px; flex-wrap: wrap;">
+        <input type="text" name="tracking_number" placeholder="Tracking number" required style="flex: 1; min-width: 200px;">
+        <select name="carrier" required>
+            <option value="">Carrier...</option>
+            <option value="usps">USPS</option>
+            <option value="ups">UPS</option>
+            <option value="fedex">FedEx</option>
+            <option value="amazon">Amazon</option>
+            <option value="dhl">DHL</option>
+            <option value="other">Other</option>
+        </select>
+        <input type="text" name="description" placeholder="Description (optional)" style="flex: 1; min-width: 150px;">
+        <button type="submit">Add</button>
+    </form>
+</div>
+
+<div class="section">
+    <h2>Active ({{ active_shipments|length }})</h2>
+    {% if active_shipments %}
+        {% for shipment in active_shipments %}
+        <div class="card">
+            <div style="display: flex; justify-content: space-between; align-items: flex-start;">
+                <div>
+                    <span class="status status-{{ shipment.status }}">{{ shipment.status.replace('_', ' ') }}</span>
+                    <strong>{{ shipment.carrier.upper() }}</strong>
+                    {% if shipment.description %}
+                        - {{ shipment.description }}
+                    {% endif %}
+                </div>
+                {% if shipment.eta %}
+                <div style="text-align: right;">
+                    <strong>ETA:</strong> {{ shipment.eta.strftime('%b %d') }}
+                </div>
+                {% endif %}
+            </div>
+            <div class="meta">
+                <a href="{{ shipment.tracking_link() }}" target="_blank">{{ shipment.tracking_number }}</a>
+                {% if shipment.source_email_subject %}
+                    <br>From: {{ shipment.source_email_subject[:60] }}{% if shipment.source_email_subject|length > 60 %}...{% endif %}
+                {% endif %}
+            </div>
+            <div class="actions">
+                <form method="post" action="/shipments/{{ shipment.id }}/archive" style="margin: 0;">
+                    <button type="submit" class="secondary">Archive</button>
+                </form>
+                <form method="post" action="/shipments/{{ shipment.id }}/delete" style="margin: 0;">
+                    <button type="submit" class="danger">Delete</button>
+                </form>
+            </div>
+        </div>
+        {% endfor %}
+    {% else %}
+        <p style="color: #666;">No active shipments</p>
+    {% endif %}
+</div>
+
+{% if delivered_shipments %}
+<div class="section">
+    <h2>Recently Delivered ({{ delivered_shipments|length }})</h2>
+    {% for shipment in delivered_shipments %}
+    <div class="card" style="opacity: 0.7;">
+        <div>
+            <span class="status status-delivered">delivered</span>
+            <strong>{{ shipment.carrier.upper() }}</strong>
+            {% if shipment.description %}
+                - {{ shipment.description }}
+            {% endif %}
+        </div>
+        <div class="meta">
+            <a href="{{ shipment.tracking_link() }}" target="_blank">{{ shipment.tracking_number }}</a>
+        </div>
+        <div class="actions">
+            <form method="post" action="/shipments/{{ shipment.id }}/archive" style="margin: 0;">
+                <button type="submit" class="secondary">Archive</button>
+            </form>
+        </div>
+    </div>
+    {% endfor %}
+</div>
+{% endif %}
+{% endblock %}
