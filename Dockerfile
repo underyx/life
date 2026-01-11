@@ -5,10 +5,11 @@ WORKDIR /app
 # Install uv
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 
-# Copy dependency files
+# Copy project files needed for installation
 COPY pyproject.toml README.md ./
+COPY src/ src/
 
-# Install dependencies
+# Install the package and its dependencies
 RUN uv pip install --system --no-cache .
 
 FROM python:3.12-slim
@@ -19,8 +20,8 @@ WORKDIR /app
 COPY --from=builder /usr/local/lib/python3.12/site-packages /usr/local/lib/python3.12/site-packages
 COPY --from=builder /usr/local/bin /usr/local/bin
 
-# Copy application code
-COPY src/ src/
+# Copy templates (not included in the wheel)
+COPY src/life/templates/ /usr/local/lib/python3.12/site-packages/life/templates/
 
 # Create non-root user
 RUN useradd -m -u 1000 app && mkdir -p /data && chown app:app /data
