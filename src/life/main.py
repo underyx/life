@@ -2,12 +2,13 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import Depends, FastAPI, Request
+from fastapi import FastAPI, Form, HTTPException, Request
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from fastapi.templating import Jinja2Templates
 
-from life.auth import check_auth, login, logout
+from life.auth import check_auth, logout, SESSION_COOKIE_NAME
+from life.config import settings
 from life.routers import health, webhooks, shipments
 from life.storage import database
 from life.tasks.scheduler import start_scheduler, shutdown_scheduler
@@ -60,8 +61,20 @@ async def login_page(request: Request):
 
 
 @app.post("/login")
-async def login_action(response: RedirectResponse = Depends(login)):
+async def login_action(secret: str = Form(...)):
     """Handle login form submission."""
+    if secret != settings.secret_key:
+        raise HTTPException(status_code=401, detail="Invalid secret")
+
+    response = RedirectResponse(url="/shipments", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE_NAME,
+        settings.secret_key,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+        max_age=60 * 60 * 24 * 30,  # 30 days
+    )
     return response
 
 
