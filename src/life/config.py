@@ -5,6 +5,7 @@ class Settings(BaseSettings):
     secret_key: str
     data_dir: str = "/data"
     base_url: str = "https://life.ts.bence.dev"
+    ship24_api_key: str | None = None
 
     model_config = {"env_prefix": "LIFE_"}
 

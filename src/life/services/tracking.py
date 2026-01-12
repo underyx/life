@@ -1,138 +1,148 @@
-import re
+import logging
 from datetime import datetime, timezone
 
 import httpx
-from selectolax.parser import HTMLParser
 
+from life.config import settings
 from life.models.shipment import Shipment, TrackingEvent
+
+logger = logging.getLogger(__name__)
+
+SHIP24_API_URL = "https://api.ship24.com/public/v1"
 
 
 async def fetch_tracking_status(shipment: Shipment) -> Shipment | None:
-    """Fetch latest tracking status for a shipment. Returns updated shipment or None if failed."""
-    match shipment.carrier:
-        case "ups":
-            return await _fetch_ups(shipment)
-        case "usps":
-            return await _fetch_usps(shipment)
-        case "fedex":
-            return await _fetch_fedex(shipment)
-        case _:
-            return None
-
-
-async def _fetch_ups(shipment: Shipment) -> Shipment | None:
-    """Fetch UPS tracking status."""
-    url = f"https://www.ups.com/track?tracknum={shipment.tracking_number}"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            # UPS requires specific headers
-            response = await client.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                    "Accept": "text/html,application/xhtml+xml",
-                },
-                follow_redirects=True,
-                timeout=30.0,
-            )
-
-            if response.status_code != 200:
-                return None
-
-            # UPS uses a lot of JavaScript, so basic HTML parsing may not work well
-            # For now, just update the tracking URL and return
-            shipment.tracking_url = url
-            return shipment
-
-    except Exception:
+    """Fetch latest tracking status for a shipment using Ship24 API."""
+    if not settings.ship24_api_key:
+        logger.warning("No Ship24 API key configured")
         return None
 
-
-async def _fetch_usps(shipment: Shipment) -> Shipment | None:
-    """Fetch USPS tracking status."""
-    url = f"https://tools.usps.com/go/TrackConfirmAction?tLabels={shipment.tracking_number}"
-
     try:
         async with httpx.AsyncClient() as client:
+            headers = {
+                "Authorization": f"Bearer {settings.ship24_api_key}",
+                "Content-Type": "application/json",
+            }
+
+            # First, ensure tracker exists
+            await client.post(
+                f"{SHIP24_API_URL}/trackers",
+                json={"trackingNumber": shipment.tracking_number},
+                headers=headers,
+                timeout=30.0,
+            )
+
+            # Get tracking results
             response = await client.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                    "Accept": "text/html,application/xhtml+xml",
-                },
-                follow_redirects=True,
+                f"{SHIP24_API_URL}/trackers/search/{shipment.tracking_number}/results",
+                headers=headers,
                 timeout=30.0,
             )
 
             if response.status_code != 200:
+                logger.error(f"Ship24 API error: {response.status_code}")
                 return None
 
-            tree = HTMLParser(response.text)
+            data = response.json()
+            trackings = data.get("data", {}).get("trackings", [])
 
-            # Try to find status
-            status_elem = tree.css_first(".delivery-status-header, .tb-status")
-            if status_elem:
-                status_text = status_elem.text().strip().lower()
-                if "delivered" in status_text:
-                    shipment.status = "delivered"
-                elif "out for delivery" in status_text:
-                    shipment.status = "out_for_delivery"
-                elif "in transit" in status_text or "on its way" in status_text:
-                    shipment.status = "in_transit"
-                elif "accepted" in status_text or "picked up" in status_text:
-                    shipment.status = "pending"
+            if not trackings:
+                return None
 
-            # Try to find expected delivery date
-            eta_elem = tree.css_first(".expected-delivery, .tb-expected-delivery-date")
-            if eta_elem:
-                eta_text = eta_elem.text().strip()
-                # Try to parse date - this is fragile but worth trying
-                date_match = re.search(
-                    r"(January|February|March|April|May|June|July|August|September|October|November|December)\s+\d{1,2},?\s*\d{4}",
-                    eta_text,
-                )
-                if date_match:
+            tracking = trackings[0]
+            ship = tracking.get("shipment", {})
+            events = tracking.get("events", [])
+
+            # Update status based on statusMilestone
+            milestone = ship.get("statusMilestone", "").lower()
+            if milestone == "delivered":
+                shipment.status = "delivered"
+            elif milestone == "out_for_delivery":
+                shipment.status = "out_for_delivery"
+            elif milestone == "in_transit":
+                shipment.status = "in_transit"
+            elif milestone == "info_received":
+                shipment.status = "pending"
+            elif milestone == "exception" or milestone == "failed_attempt":
+                shipment.status = "exception"
+            else:
+                shipment.status = "unknown"
+
+            # Update ETA
+            delivery = ship.get("delivery", {})
+            eta_str = delivery.get("estimatedDeliveryDate")
+            if eta_str:
+                try:
+                    shipment.eta = datetime.fromisoformat(eta_str.replace("Z", "+00:00"))
+                except ValueError:
+                    pass
+
+            # Update carrier from Ship24's detection
+            courier_code = None
+            if events:
+                courier_code = events[0].get("courierCode", "")
+
+            if courier_code:
+                carrier_map = {
+                    "us-post": "usps",
+                    "ups": "ups",
+                    "fedex": "fedex",
+                    "dhl": "dhl",
+                }
+                shipment.carrier = carrier_map.get(courier_code, shipment.carrier)
+
+            # Set tracking URL
+            shipment.tracking_url = _get_tracking_url(shipment.carrier, shipment.tracking_number)
+
+            # Update description with service type
+            service = delivery.get("service")
+            if service and not shipment.description:
+                shipment.description = service
+
+            # Convert events to history
+            new_history = []
+            for event in events:
+                event_time = event.get("datetime")
+                if event_time:
                     try:
-                        shipment.eta = datetime.strptime(
-                            date_match.group(0).replace(",", ""), "%B %d %Y"
-                        ).replace(tzinfo=timezone.utc)
+                        timestamp = datetime.fromisoformat(event_time.replace("Z", "+00:00"))
                     except ValueError:
-                        pass
+                        timestamp = datetime.now(timezone.utc)
+                else:
+                    timestamp = datetime.now(timezone.utc)
 
-            shipment.tracking_url = url
+                location = event.get("location") or ""
+                status_text = event.get("status", "")
+                description = f"{status_text} - {location}".strip(" -")
+
+                new_history.append(
+                    TrackingEvent(
+                        timestamp=timestamp,
+                        description=description,
+                        location=location,
+                        status=event.get("statusMilestone") or shipment.status,
+                    )
+                )
+
+            if new_history:
+                shipment.history = new_history
+
             return shipment
 
-    except Exception:
+    except Exception as e:
+        logger.exception(f"Error fetching tracking: {e}")
         return None
 
 
-async def _fetch_fedex(shipment: Shipment) -> Shipment | None:
-    """Fetch FedEx tracking status."""
-    url = f"https://www.fedex.com/fedextrack/?trknbr={shipment.tracking_number}"
-
-    try:
-        async with httpx.AsyncClient() as client:
-            response = await client.get(
-                url,
-                headers={
-                    "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-                    "Accept": "text/html,application/xhtml+xml",
-                },
-                follow_redirects=True,
-                timeout=30.0,
-            )
-
-            if response.status_code != 200:
-                return None
-
-            # FedEx is heavily JavaScript-based, so basic parsing won't work well
-            # Just update the URL for now
-            shipment.tracking_url = url
-            return shipment
-
-    except Exception:
-        return None
+def _get_tracking_url(carrier: str, tracking_number: str) -> str:
+    """Get carrier tracking URL."""
+    urls = {
+        "usps": f"https://tools.usps.com/go/TrackConfirmAction?tLabels={tracking_number}",
+        "ups": f"https://www.ups.com/track?tracknum={tracking_number}",
+        "fedex": f"https://www.fedex.com/fedextrack/?trknbr={tracking_number}",
+        "dhl": f"https://www.dhl.com/en/express/tracking.html?AWB={tracking_number}",
+    }
+    return urls.get(carrier, f"https://www.ship24.com/tracking/{tracking_number}")
 
 
 async def update_all_shipments() -> dict:
@@ -150,17 +160,9 @@ async def update_all_shipments() -> dict:
 
         result = await fetch_tracking_status(shipment)
         if result:
-            # Add history event if status changed
-            if result.status != shipment.status:
-                result.history.append(
-                    TrackingEvent(
-                        timestamp=datetime.now(timezone.utc),
-                        description=f"Status changed to {result.status}",
-                        status=result.status,
-                    )
-                )
             database.save("shipments", result)
             updated += 1
+            logger.info(f"Updated {shipment.tracking_number}: {result.status}")
         else:
             failed += 1
 
